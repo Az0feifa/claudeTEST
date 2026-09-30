@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<!-- made with onetake (github.com/feitangyuan/onetake) · PolyForm Noncommercial 1.0.0 -->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>gerald · reacción en cadena</title>
+<style>
+html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:var(--ground,#f2efe9)}
+canvas{position:absolute;left:0;top:0;width:1920px;height:1080px}
+#hud{position:absolute;right:14px;bottom:10px;font:13px monospace;color:#c00;display:none}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud"></div>
+<script src="look.js"></script>
+<script src="motion.js"></script>
+<script>
+// Gerald — una reacción en cadena
+// La mano enciende la idea → la idea rueda y tumba el copy → el copy tumba el reel → el reel se
+// reproduce (pausa) y al terminar vibra → la vibración tumba los likes → el último like tumba las
+// letras G·E·R·A·L·D → la cámara se aleja, aparece quién es. Todo f(t), un canvas, cero assets.
+const {clamp, lerp, sstep, seg, spring, ring, ease} = OM;
+const DUR = 15, W = 1920, H = 1080;
+window.__meta = {dur: DUR, fps: 30, w: W, h: H};
+
+const C = k => (window.LOOK && LOOK.color && LOOK.color[k]) || ({ground:'#f2efe9',deep:'#e3dfd7',card:'#ffffff',line:'#d5d0c6',mute:'#7d7970',ink:'#1b1a18',accent:'#ff5a36',accent2:'#17a05e'})[k];
+const FONT = (role, px, wt) => (window.LOOK && LOOK.font) ? LOOK.font(role === 'display' ? 'display' : role, px, wt) : `${wt || 500} ${px}px Inter, system-ui, sans-serif`;
+
+// the machine (world coordinates, table y = 540)
+const Y = 540;
+const TAP = 0.78;                              // the hand lights the idea
+const BULB0 = {x: 250, y: Y}, BR = 30;
+const ROLL0 = 0.92, HIT0 = 2.05;               // the idea rolls from ROLL0 and hits the copy at HIT0
+const TILES = [];                              // {kind, x (pivot), L, w, dur, face, t0}
+TILES.push({kind: 'copy',  x: 640, L: 300, w: 220, dur: 0.52});
+TILES.push({kind: 'reel',  x: 900, L: 340, w: 200, dur: 0.56});
+const REEL_PLAY = [3.25, 4.65], BUZZ = 4.72;   // the reel plays (the rest), then buzzes
+const LIKES = ['1', '12', '48', '230', '1,2 k', '5,8 k', '12 k'];
+LIKES.forEach((n, i) => TILES.push({kind: 'like', n, x: 1262 + i * 100, L: 120, w: 150, dur: 0.40 * Math.pow(0.88, i)}));
+const NAME = [...'GERALD'];
+NAME.forEach((ch, i) => TILES.push({kind: 'letter', ch, i, x: 1960 + i * 150, L: 170, w: 160, dur: 0.42 * Math.pow(0.9, i)}));
+const T_THICK = 12;
+const theta = (tile, t) => Math.PI / 2 * Math.pow(seg(t, tile.t0, tile.t0 + tile.dur), 2.2);
+// chain timing: tile i+1 starts the instant tile i's top reaches its pivot
+(function chain() {
+  TILES[0].t0 = HIT0;
+  for (let i = 0; i < TILES.length - 1; i++) {
+    const a = TILES[i], b = TILES[i + 1];
+    if (a.kind === 'reel') { b.t0 = BUZZ + 0.04; continue; }            // the buzz, not the fall, starts the likes
+    const need = Math.asin(Math.min(1, (b.x - a.x - 4) / a.L));      // lean needed to touch
+    const u = Math.pow(need / (Math.PI / 2), 1 / 2.2);
+    b.t0 = a.t0 + u * a.dur;
+  }
+})();
+const LAST = TILES[TILES.length - 1], NAME_DONE = LAST.t0 + LAST.dur;
+const firstLetter = TILES.find(t => t.kind === 'letter');
+const PULL = [NAME_DONE + 0.55, NAME_DONE + 1.75];
+const SUB_T = PULL[1] - 0.15, HOLA_T = PULL[1] + 0.2;
+const TAP2 = 13.35;                                                   // the hand lights the idea once more
+
+// the idea: rest → lit → rolls under gravity-ish (d ~ u²) → hits → rebounds a touch
+const ROLL_END = TILES[0].x - BR - 2;
+function bulb(t) {
+  let x = BULB0.x;
+  if (t >= ROLL0) {
+    const u = seg(t, ROLL0, HIT0); x = lerp(BULB0.x, ROLL_END, u * u);
+    if (t > HIT0) x = ROLL_END - 18 * (1 - Math.exp(-7 * (t - HIT0))) * (1 - 0.4 * Math.exp(-3 * (t - HIT0)));
+  }
+  const lit = t >= TAP ? 1 : 0;
+  const rot = (x - BULB0.x) / BR;
+  return {x, y: BULB0.y, lit, rot};
+}
+
+// the hand
+const HAND = [
+  {t: 0.05, x: 520, y: 900}, {t: 0.62, x: BULB0.x + 6, y: BULB0.y + 8}, {t: 0.92, x: BULB0.x + 6, y: BULB0.y + 8},
+  {t: 1.40, x: 360, y: 860},
+  {t: 12.70, x: 520, y: 880}, {t: 13.20, x: BULB0.x - 12, y: BULB0.y + 10}, {t: 13.55, x: BULB0.x - 12, y: BULB0.y + 10}, {t: 14.2, x: 420, y: 900},
+];
+const handVis = t => (t > 0.05 && t < 1.40) || (t > 12.7 && t < 14.2);
+
+// camera
+const likes = TILES.filter(t => t.kind === 'like'), letters = TILES.filter(t => t.kind === 'letter');
+const KEYS = [
+  {t: 0.00, x: 340, y: Y + 20, zoom: 1.85},
+  {t: 0.95, x: 330, y: Y + 10, zoom: 1.8, curve: ease.sineInOut},
+  {t: 2.05, x: 640, y: Y, zoom: 1.45, curve: ease.sineInOut},                  // following the roll, a hair ahead
+  {t: 2.95, x: 1000, y: Y, zoom: 1.35, curve: ease.cubicInOut},                // the copy tips into the reel
+  {t: 3.35, x: 1070, y: Y, zoom: 1.75, curve: ease.expoInOut},                 // snap onto the reel as it plays
+  {t: 4.62, x: 1080, y: Y, zoom: 1.8, curve: ease.sineInOut},                  // the rest: dead still, pushing in a hair
+  {t: 5.05, x: 1400, y: Y, zoom: 1.45, curve: ease.expoInOut},                 // whip to the first likes
+  {t: likes[6].t0 + 0.1, x: 1830, y: Y, zoom: 1.35, curve: ease.sineInOut},     // the run's front
+  {t: NAME_DONE - 0.05, x: 2480, y: Y, zoom: 1.25, curve: ease.sineInOut},     // the letters
+  {t: PULL[0], x: 2440, y: Y, zoom: 1.28, curve: ease.sineInOut},
+  {t: PULL[1], x: 1580, y: Y + 30, zoom: 0.66, curve: ease.quintInOut},        // pull out: the whole chain
+  {t: DUR, x: 1580, y: Y + 30, zoom: 0.665},
+];
+const HITS = [[TAP, 3, 12], [HIT0, 4, 11], [TILES[1].t0 + TILES[1].dur, 7, 9], [BUZZ, 3, 14], [NAME_DONE, 6, 9], [TAP2, 2, 12]];
+const handEnv = t => sstep(0.2, 0.8, t) * (1 - sstep(3.3, 3.5, t)) + sstep(4.7, 5.0, t) * (1 - sstep(PULL[1] - 0.2, PULL[1] + 0.2, t));
+function camAt(t) {
+  const c = OM.camera(t, KEYS), e = handEnv(t) * 4;
+  let x = c.x + e * (Math.sin(1.7 * t) + 0.6 * Math.sin(2.9 * t + 1)) / c.zoom;
+  let y = c.y + e * (Math.sin(1.3 * t + 2) + 0.5 * Math.sin(3.3 * t)) / c.zoom;
+  let rot = c.rot;
+  for (const [th, amp, decay] of HITS) { const s = OM.shake(t, th, {amp, decay, seed: Math.round(th * 100)}); x += s.x / c.zoom; y += s.y / c.zoom; rot += s.rot * 0.3; }
+  return {x, y, zoom: c.zoom, rot};
+}
+
+// drawing
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const DPR = Math.max(1, window.devicePixelRatio || 1);
+cv.width = W * DPR; cv.height = H * DPR;
+let CAM = {x: 960, y: 540, zoom: 1, rot: 0};
+const mat = M => ctx.setTransform(M[0] * DPR, M[1] * DPR, M[2] * DPR, M[3] * DPR, M[4] * DPR, M[5] * DPR);
+const S = () => DPR * CAM.zoom;                      // canvas effects are in device pixels
+function rr(x, y, w, h, r) { r = Math.min(r, w / 2, h / 2); ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function shadowed(z, fn) {                           // height shows as a soft offset shadow
+  ctx.save(); ctx.shadowColor = 'rgba(40,30,20,' + (0.20 - Math.min(0.1, z * 0.0004)) + ')';
+  ctx.shadowBlur = (4 + z * 0.22) * S(); ctx.shadowOffsetX = (1 + z * 0.30) * S(); ctx.shadowOffsetY = (2 + z * 0.38) * S();
+  fn(); ctx.restore();
+}
+function heart(cx, cy, s) {
+  ctx.beginPath(); ctx.moveTo(cx, cy + s * 0.9);
+  ctx.bezierCurveTo(cx - s * 1.4, cy - s * 0.1, cx - s * 0.7, cy - s * 1.1, cx, cy - s * 0.35);
+  ctx.bezierCurveTo(cx + s * 0.7, cy - s * 1.1, cx + s * 1.4, cy - s * 0.1, cx, cy + s * 0.9); ctx.closePath();
+}
+
+function face(tile, t, w, h) {                        // drawn in the tile's lying-flat box (0,0,L,w); x is foreshortened by the caller
+  const k = tile.kind;
+  if (k === 'copy') {
+    ctx.fillStyle = C('card'); rr(0, 0, w, h, 14); ctx.fill();
+    ctx.fillStyle = C('mute'); ctx.font = FONT('mono', 15, 500); ctx.textBaseline = 'top'; ctx.fillText('COPY', 22, 20);
+    ctx.fillStyle = C('ink'); ctx.font = FONT('display', 30, 700); ctx.fillText('Tu marca,', 22, 52); ctx.fillText('bien contada.', 22, 88);
+    ctx.fillStyle = C('line'); for (let i = 0; i < 3; i++) { rr(22, 142 + i * 20, [230, 200, 150][i], 9, 4.5); ctx.fill(); }
+  } else if (k === 'reel') {
+    ctx.fillStyle = C('ink'); rr(0, 0, w, h, 26); ctx.fill();
+    const g = ctx.createLinearGradient(0, 0, w, h); g.addColorStop(0, '#3a2a24'); g.addColorStop(1, '#1b1a18');
+    ctx.fillStyle = g; rr(10, 10, w - 20, h - 20, 18); ctx.fill();
+    const p = seg(t, REEL_PLAY[0], REEL_PLAY[1]), playing = t >= REEL_PLAY[0] && t < REEL_PLAY[1] + 0.1;
+    // play → pause glyph
+    ctx.fillStyle = '#fff'; const cx = w / 2, cy = h / 2 - 6;
+    if (!playing) { ctx.beginPath(); ctx.moveTo(cx - 22, cy - 28); ctx.lineTo(cx + 30, cy); ctx.lineTo(cx - 22, cy + 28); ctx.closePath(); ctx.fill(); }
+    else { const pul = 1 + 0.04 * Math.sin((t - REEL_PLAY[0]) * 9); ctx.globalAlpha = 0.9; rr(cx - 20 * pul, cy - 26, 13, 52, 3); ctx.fill(); rr(cx + 7 * pul, cy - 26, 13, 52, 3); ctx.fill(); ctx.globalAlpha = 1; }
+    ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.font = FONT('mono', 15, 500); ctx.textBaseline = 'top'; ctx.fillText('REEL', 26, 26);
+    ctx.fillStyle = 'rgba(255,255,255,.18)'; rr(26, h - 38, w - 52, 7, 3.5); ctx.fill();
+    ctx.fillStyle = C('accent'); rr(26, h - 38, Math.max(7, (w - 52) * ease.sineInOut(p)), 7, 3.5); ctx.fill();
+  } else if (k === 'like') {
+    ctx.fillStyle = C('card'); rr(0, 0, w, h, 14); ctx.fill();
+    const land = ring(t - tile.t0 - tile.dur, 9, 24) * 0.25;
+    ctx.save(); ctx.translate(w / 2, h * 0.40); ctx.scale(1 + land, 1 - land * 0.6); ctx.fillStyle = C('accent'); heart(0, 0, 20); ctx.fill(); ctx.restore();
+    ctx.fillStyle = C('ink'); ctx.font = FONT('mono', 20, 600); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(tile.n, w / 2, h * 0.76); ctx.textAlign = 'left';
+  } else if (k === 'letter') {
+    ctx.fillStyle = tile.i === 0 ? C('accent') : C('card'); rr(0, 0, w, h, 16); ctx.fill();
+    ctx.fillStyle = tile.i === 0 ? '#fff' : C('ink'); ctx.font = FONT('display', 118, 800); ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    const m = ctx.measureText(tile.ch); const asc = m.actualBoundingBoxAscent || 86;
+    ctx.fillText(tile.ch, w / 2, h / 2 + asc / 2); ctx.textAlign = 'left';
+  }
+}
+
+function drawTile(tile, t) {
+  const th = theta(tile, t), sn = Math.sin(th), cs = Math.cos(th);
+  const len = tile.L * sn + T_THICK * cs, z = tile.L * cs * 0.5;       // footprint along x; height of its middle
+  let buzz = 0; if (tile.kind === 'reel') buzz = ring(t - BUZZ, 11, 70) * 5;
+  const x0 = tile.x - T_THICK * cs * 0.5 + buzz, y0 = Y - tile.w / 2;
+  const landed = th >= Math.PI / 2 - 1e-4;
+  const sq = landed ? OM.impact(t, tile.t0 + tile.dur, {decay: 10, omega: 26, sqx: 0.04, sqy: 0.05}) : {sx: 1, sy: 1};
+  ctx.save(); ctx.translate(x0 + len / 2, Y); ctx.scale(sq.sx, sq.sy); ctx.translate(-(x0 + len / 2), -Y);
+  shadowed(z, () => { ctx.fillStyle = C('card'); rr(x0, y0, Math.max(len, 1), tile.w, 12); ctx.fill(); });
+  ctx.save(); rr(x0, y0, Math.max(len, 1), tile.w, 12); ctx.clip();
+  if (sn > 0.02) { ctx.translate(x0, y0); ctx.scale(sn, 1); face(tile, t, tile.L, tile.w); }
+  // the edge on top while it stands, darkening the face as it leans away from the light
+  ctx.setTransform(ctx.getTransform());
+  ctx.restore();
+  if (cs > 0.02) { ctx.fillStyle = `rgba(27,26,24,${(0.10 * cs).toFixed(3)})`; rr(x0, y0, Math.max(len, 1), tile.w, 12); ctx.fill();
+    ctx.fillStyle = C('deep'); rr(x0 + len - T_THICK * cs, y0, T_THICK * cs, tile.w, 4); ctx.fill(); }
+  ctx.restore();
+}
+
+function drawBulb(t) {
+  const b = bulb(t);
+  const pr = OM.press(t, TAP, {depth: 0.14}), pr2 = OM.press(t, TAP2, {depth: 0.12});
+  const s = pr.s * pr2.s;
+  const glow = b.lit * (0.55 + 0.45 * Math.exp(-3 * Math.max(0, t - TAP))) + sstep(TAP2, TAP2 + 0.1, t) * Math.exp(-2 * (t - TAP2)) * 0.8;
+  if (glow > 0.01) { const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, BR * 4.2); g.addColorStop(0, `rgba(255,190,90,${(0.55 * glow).toFixed(3)})`); g.addColorStop(1, 'rgba(255,190,90,0)'); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(b.x, b.y, BR * 4.2, 0, 7); ctx.fill(); }
+  shadowed(BR * 0.9, () => { ctx.fillStyle = b.lit ? '#fff4d6' : '#ffffff'; ctx.beginPath(); ctx.arc(b.x, b.y, BR * s, 0, 7); ctx.fill(); });
+  // filament that rolls with it
+  ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(b.rot); ctx.strokeStyle = b.lit ? C('accent') : C('mute'); ctx.lineWidth = 3.2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-11 * s, 6 * s); ctx.lineTo(-5 * s, -7 * s); ctx.lineTo(0, 4 * s); ctx.lineTo(5 * s, -7 * s); ctx.lineTo(11 * s, 6 * s); ctx.stroke();
+  ctx.fillStyle = C('line'); rr(-9 * s, 12 * s, 18 * s, 9 * s, 3); ctx.fill(); ctx.restore();
+}
+
+// pencil captions on the table, written as the chain reaches each object
+const NOTES = [
+  {txt: 'la idea', x: BULB0.x - 42, y: Y + 78, t: 0.95},
+  {txt: 'el copy', x: 650, y: Y + 166, t: TILES[0].t0 + TILES[0].dur - 0.05},
+  {txt: 'el reel', x: 910, y: Y + 166, t: TILES[1].t0 + TILES[1].dur + 0.1},
+  {txt: 'los likes', x: 1270, y: Y + 166, t: likes[1].t0 + 0.2},
+];
+function drawNotes(t) {
+  ctx.font = FONT('mono', 20, 500); ctx.textBaseline = 'top';
+  for (const n of NOTES) { const k = seg(t, n.t, n.t + 0.35); if (k <= 0) continue; const w = ctx.measureText(n.txt).width;
+    ctx.save(); ctx.beginPath(); ctx.rect(n.x - 4, n.y - 6, (w + 8) * ease.cubicOut(k), 40); ctx.clip(); ctx.fillStyle = C('mute'); ctx.fillText(n.txt, n.x, n.y); ctx.restore(); }
+}
+function drawGuide(t) {                              // a pencil line the chain runs along, inking behind the run
+  const front = t < HIT0 ? bulb(t).x : Math.max(...TILES.filter(x => t >= x.t0).map(x => x.x + x.L * Math.sin(theta(x, t))), ROLL_END);
+  ctx.setLineDash([2, 10]); ctx.lineCap = 'round'; ctx.strokeStyle = C('line'); ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.moveTo(BULB0.x, Y + 150); ctx.lineTo(LAST.x + LAST.L + 40, Y + 150); ctx.stroke();
+  ctx.setLineDash([]); ctx.strokeStyle = C('accent'); ctx.globalAlpha = 0.55; ctx.lineWidth = 2.6;
+  ctx.beginPath(); ctx.moveTo(BULB0.x, Y + 150); ctx.lineTo(Math.max(BULB0.x, front), Y + 150); ctx.stroke(); ctx.globalAlpha = 1;
+}
+// quién es — rises under the name once the camera has pulled out
+const SUB = 'marketing digital  ·  creación de contenido  ·  Costa Rica';
+function drawTitle(t) {
+  const x0 = firstLetter.x, cx = (BULB0.x - BR + LAST.x + LAST.L) / 2;
+  const h = OM.wordRise(t, HOLA_T, {dist: 30});
+  if (t >= HOLA_T - 0.05) { ctx.globalAlpha = h.op; ctx.fillStyle = C('ink'); ctx.font = FONT('display', 64, 600); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.fillText('hola, soy', x0, Y - 128 + h.y); ctx.globalAlpha = 1; }
+  const s = OM.wordRise(t, SUB_T, {dist: 34});
+  if (t >= SUB_T - 0.05) { ctx.globalAlpha = s.op; ctx.fillStyle = C('mute'); ctx.font = FONT('display', 58, 500); ctx.textAlign = 'center'; ctx.fillText(SUB, cx, Y + 250 + s.y); ctx.textAlign = 'left'; ctx.globalAlpha = 1; }
+}
+function drawHand(t) {
+  if (!handVis(t)) return;
+  const cu = OM.cursor(t, HAND, [TAP, TAP2]);
+  ctx.save(); ctx.translate(cu.x, cu.y); ctx.scale(cu.s * 1.25, cu.s * 1.25);
+  shadowed(10, () => { ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(26, 19); ctx.lineTo(14, 21); ctx.lineTo(22, 37); ctx.lineTo(16, 40); ctx.lineTo(8, 24); ctx.lineTo(0, 33); ctx.closePath(); ctx.fillStyle = C('ink'); ctx.fill(); });
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.2; ctx.lineJoin = 'round'; ctx.stroke(); ctx.restore();
+  return cu;
+}
+
+let NOISE = null;
+function ground() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const g = ctx.createRadialGradient(W / 2, H * 0.45, 100, W / 2, H / 2, W * 0.75); g.addColorStop(0, C('ground')); g.addColorStop(1, C('deep'));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (NOISE) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = NOISE; ctx.fillRect(0, 0, cv.width, cv.height); }
+}
+function makeNoise() {
+  const n = document.createElement('canvas'); n.width = n.height = 256; const c = n.getContext('2d'), d = c.createImageData(256, 256), r = OM.rng(11);
+  for (let i = 0; i < 256 * 256; i++) { const v = r() < 0.5 ? 255 : 0; d.data[i * 4] = d.data[i * 4 + 1] = d.data[i * 4 + 2] = v; d.data[i * 4 + 3] = Math.floor(r() * 6); }
+  c.putImageData(d, 0, 0); return ctx.createPattern(n, 'repeat');
+}
+
+// seek
+let TRACK = {};
+function seek(t) {
+  CAM = camAt(t);
+  ground();
+  const G = OM.lattice(CAM, {depth: 1.2, spacing: 56}); mat(G.matrix); ctx.fillStyle = 'rgba(27,26,24,.07)';
+  for (let x = Math.floor(G.x0 / G.spacing) * G.spacing; x < G.x1; x += G.spacing) for (let y = Math.floor(G.y0 / G.spacing) * G.spacing; y < G.y1; y += G.spacing) { ctx.beginPath(); ctx.arc(x, y, G.r * 1.6, 0, 7); ctx.fill(); }
+  const V = OM.view(CAM); mat(V);
+  drawGuide(t); drawNotes(t);
+  for (const tile of TILES) drawTile(tile, t);
+  drawBulb(t); drawTitle(t);
+  const cu = drawHand(t);
+  // report what the viewer sees
+  const b = bulb(t), P = box => OM.projectBox(V, box);
+  TRACK = {idea: P({x: b.x - BR, y: b.y - BR, w: BR * 2, h: BR * 2, op: 1})};
+  for (const tile of TILES) { const len = tile.L * Math.sin(theta(tile, t)) + T_THICK; if (t >= tile.t0 - 0.3 || tile.kind !== 'letter') TRACK[tile.kind + (tile.ch || tile.n || '')] = P({x: tile.x, y: Y - tile.w / 2, w: len, h: tile.w, op: 1}); }
+  TRACK.name = P({x: firstLetter.x - 10, y: Y - 190, w: LAST.x + LAST.L - firstLetter.x + 20, h: 420, op: t >= NAME_DONE ? 1 : 0});
+  if (cu) TRACK.hand = P({x: cu.x, y: cu.y, w: 32, h: 50, op: 1});
+  document.getElementById('hud').textContent = 't=' + t.toFixed(3);
+}
+window.__seek = async t => { seek(t); return true; };
+window.__track = t => { seek(t); const o = {}; for (const k in TRACK) o[k] = TRACK[k]; return o; };
+window.__motion = (t0, t1) => {
+  const tm = (t0 + t1) / 2, c0 = camAt(t0), c1 = camAt(t1), cm = camAt(tm);
+  let far = OM.screenTravel(c0, c1, cm);
+  seek(t0); const A = {...TRACK}; seek(t1); const B = TRACK;
+  for (const k in A) if (B[k]) far = Math.max(far, Math.abs(A[k].x - B[k].x) + Math.abs(A[k].w - B[k].w), Math.abs(A[k].y - B[k].y) + Math.abs(A[k].h - B[k].h));
+  return far;
+};
+window.__meta.inFrame = {idea: [0.3, 2.0], reel: [3.3, 4.7], name: [PULL[1], DUR, 'whole']};
+window.__events = () => {
+  const ev = [{t: TAP, kind: 'tap', x: BULB0.x}, {t: ROLL0, kind: 'roll', x: BULB0.x}, {t: HIT0, kind: 'hit', x: ROLL_END}];
+  for (const tile of TILES) ev.push({t: tile.t0 + tile.dur, kind: 'land-' + tile.kind, x: tile.x, i: tile.i});
+  ev.push({t: REEL_PLAY[0], kind: 'play'}, {t: BUZZ, kind: 'buzz'}, {t: PULL[0], kind: 'pull'}, {t: SUB_T, kind: 'sub'}, {t: HOLA_T, kind: 'hola'}, {t: TAP2, kind: 'tap2'});
+  return ev.sort((a, b) => a.t - b.t);
+};
+const ready0 = (window.LOOK && LOOK.ready) ? LOOK.ready : document.fonts.ready;
+window.__ready = Promise.resolve(ready0).then(() => { NOISE = makeNoise(); seek(0); return true; });
+const q = new URLSearchParams(location.search);
+if (q.has('hud')) document.getElementById('hud').style.display = 'block';
+if (q.has('t')) __ready.then(() => seek(parseFloat(q.get('t'))));
+if (q.has('play')) __ready.then(() => { const t0 = performance.now(); (function loop() { seek(((performance.now() - t0) / 1000) % DUR); requestAnimationFrame(loop); })(); });
+</script>
+</body>
+</html>
